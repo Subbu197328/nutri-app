@@ -4,6 +4,11 @@ import os, re, hashlib
 from datetime import datetime
 from io import BytesIO
 from PIL import Image
+import urllib.parse
+
+# Matplotlib (Render-safe)
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import google.generativeai as genai
@@ -13,14 +18,21 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet
 
 # --------------------------------------------------
-# CONFIG
+# PAGE CONFIG
 # --------------------------------------------------
-st.set_page_config("NutriVision", "🥗", layout="wide")
+st.set_page_config(page_title="NutriVision", page_icon="🥗", layout="wide")
 
+# --------------------------------------------------
+# GEMINI CONFIG (Render-safe)
+# --------------------------------------------------
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
+# --------------------------------------------------
+# CONSTANTS
+# --------------------------------------------------
 DB = "nutrivision.db"
 HIGH_CAL_THRESHOLD = 500
+APP_URL = "https://nutri-app.onrender.com"  # 🔁 change if needed
 
 # --------------------------------------------------
 # DATABASE
@@ -62,7 +74,7 @@ def hash_pass(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
 def extract_calories(text):
-    m = re.search(r'calorie[s]?\s*[:\-]?\s*(\d+)', text, re.I)
+    m = re.search(r'(\d+)\s*kcal', text, re.I)
     return int(m.group(1)) if m else 0
 
 def extract_macros(text):
@@ -79,9 +91,13 @@ def generate_pdf(text):
     styles = getSampleStyleSheet()
     story = []
 
+    story.append(Paragraph("<b>NutriVision – Nutrition Report</b>", styles["Title"]))
+    story.append(Spacer(1, 12))
+
     for line in text.split("\n"):
-        story.append(Paragraph(line, styles["Normal"]))
-        story.append(Spacer(1, 8))
+        if line.strip():
+            story.append(Paragraph(line, styles["Normal"]))
+            story.append(Spacer(1, 6))
 
     doc.build(story)
     buf.seek(0)
@@ -90,6 +106,9 @@ def generate_pdf(text):
 def ai_analysis(prompt, image):
     model = genai.GenerativeModel("models/gemini-2.5-flash")
     return model.generate_content([prompt, image]).text
+
+def whatsapp_share(text):
+    return "https://wa.me/?text=" + urllib.parse.quote(text)
 
 # --------------------------------------------------
 # SESSION
@@ -100,7 +119,7 @@ if "username" not in st.session_state:
     st.session_state.username = ""
 
 # --------------------------------------------------
-# THEME (YOUR DARK UI)
+# DARK UI
 # --------------------------------------------------
 st.markdown("""
 <style>
@@ -154,12 +173,11 @@ if not st.session_state.logged_in:
         if st.button("Create Account"):
             try:
                 con = db(); cur = con.cursor()
-                cur.execute("INSERT INTO users VALUES (?,?)",
-                            (nu, hash_pass(np)))
+                cur.execute("INSERT INTO users VALUES (?,?)", (nu, hash_pass(np)))
                 con.commit(); con.close()
-                st.success("Account created")
+                st.success("Account created. Login now.")
             except:
-                st.error("Username exists")
+                st.error("Username already exists")
 
     st.stop()
 
@@ -177,20 +195,27 @@ if uploaded:
 
 prompt = f"""
 You are a nutritionist.
+
 Quantity: {qty}
 
 Meal Name:
 Ingredients and Calories:
+Total Calories: X kcal
+
 Macronutrient Profile:
 Protein: X
 Carbs: X
-Fats: X
+Fat: X
 Fiber: X grams
+
 Healthiness:
 Recommendation:
 Kids suitability:
 """
 
+# --------------------------------------------------
+# ANALYSIS
+# --------------------------------------------------
 if st.button("Analyse Food"):
     if not uploaded:
         st.warning("Upload image first")
@@ -216,21 +241,62 @@ if st.button("Analyse Food"):
 
         st.markdown(f"<div class='card'>{result}</div>", unsafe_allow_html=True)
 
-        p,c,f = extract_macros(result)
-        if all(v is not None for v in [p,c,f]):
-            fig, ax = plt.subplots()
-            ax.pie([p,c,f], labels=["Protein","Carbs","Fat"], autopct="%1.1f%%")
+        # PIE CHART
+        p, c, f = extract_macros(result)
+        if all(v is not None for v in [p, c, f]) and (p + c + f) > 0:
+            fig, ax = plt.subplots(figsize=(4,4))
+            ax.pie(
+                [p, c, f],
+                labels=["Protein","Carbs","Fat"],
+                autopct="%1.1f%%",
+                startangle=90
+            )
+            ax.set_title("Macronutrient Distribution")
             st.pyplot(fig)
+            plt.close(fig)
 
-        pdf = generate_pdf(result)
-        st.download_button("📄 Download PDF", pdf, "nutrivision_report.pdf")
+        # PDF
+        st.download_button(
+            "📄 Download PDF Report",
+            generate_pdf(result),
+            "nutrivision_report.pdf"
+        )
 
+        # WHATSAPP SHARE
+        share_text = f"""
+🥗 NutriVision – Nutrition Report
+
+User: {st.session_state.username}
+
+{result}
+
+📄 Download full PDF from:
+{APP_URL}
+
+🚀 Generated using NutriVision App
+"""
         st.markdown(
-            "[📤 Share on WhatsApp](https://wa.me/?text=Here%20is%20my%20NutriVision%20nutrition%20report)"
+            f"""
+            <a href="{whatsapp_share(share_text)}" target="_blank"
+            style="
+                display:inline-block;
+                background:#25D366;
+                color:white;
+                padding:12px 20px;
+                border-radius:14px;
+                font-size:16px;
+                font-weight:700;
+                text-decoration:none;
+                margin-top:12px;
+            ">
+            📤 Share Report on WhatsApp
+            </a>
+            """,
+            unsafe_allow_html=True
         )
 
 # --------------------------------------------------
-# CALENDAR HISTORY
+# HISTORY
 # --------------------------------------------------
 st.markdown("## 📅 Calorie History")
 
@@ -244,17 +310,9 @@ ORDER BY date DESC
 rows = cur.fetchall()
 con.close()
 
-current_day = None
-
 for d, meal, cal in rows:
-    day = d.split(" ")[0]
-    if day != current_day:
-        st.subheader(f"📆 {day}")
-        current_day = day
-
     color = "#FF5252" if cal >= HIGH_CAL_THRESHOLD else "#81C784"
     icon = "🔴" if cal >= HIGH_CAL_THRESHOLD else "🟢"
-
     st.markdown(
         f"""
         <div class='card' style='border-left:6px solid {color};'>
@@ -270,8 +328,8 @@ for d, meal, cal in rows:
 # --------------------------------------------------
 st.markdown("""
 <hr>
-<div style="text-align:center; color:#B0BEC5;">
-📝 Developed by Aishwarya Patil · C. G. Balasubramanyam Singh · Madhushree · Pradeep S<br>
+<div style="text-align:center; color:#B0BEC5; font-size:14px;">
+<b>Developed by</b> Aishwarya Patil · C. G. Balasubramanyam Singh · Madhushree · Pradeep S<br>
 Final Year – Information Science & Engineering<br>
 PDA College of Engineering © 2025
 </div>
