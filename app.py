@@ -1,6 +1,6 @@
 import streamlit as st
 import sqlite3
-import os, re, hashlib
+import os, re, hashlib, html
 from datetime import datetime
 from io import BytesIO
 from PIL import Image
@@ -15,7 +15,7 @@ import google.generativeai as genai
 
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 # --------------------------------------------------
 # PAGE CONFIG
@@ -32,7 +32,7 @@ genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 # --------------------------------------------------
 DB = "nutrivision.db"
 HIGH_CAL_THRESHOLD = 500
-APP_URL = "https://nutri-app.onrender.com"  # 🔁 change if needed
+APP_URL = "https://nutri-app.onrender.com"   # 🔁 change if needed
 
 # --------------------------------------------------
 # DATABASE
@@ -43,14 +43,12 @@ def db():
 def init_db():
     con = db()
     cur = con.cursor()
-
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users(
         username TEXT PRIMARY KEY,
         password TEXT
     )
     """)
-
     cur.execute("""
     CREATE TABLE IF NOT EXISTS history(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +59,6 @@ def init_db():
         details TEXT
     )
     """)
-
     con.commit()
     con.close()
 
@@ -85,19 +82,48 @@ def extract_macros(text):
         return None, None, None
     return int(p.group(1)), int(c.group(1)), int(f.group(1))
 
+# ---------- PDF CLEANING ----------
+def clean_text(text):
+    text = html.escape(text)
+    text = text.replace("**", "")
+    text = text.replace("*", "")
+    return text
+
 def generate_pdf(text):
     buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=letter)
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=letter,
+        rightMargin=40,
+        leftMargin=40,
+        topMargin=50,
+        bottomMargin=40
+    )
+
     styles = getSampleStyleSheet()
+    normal = ParagraphStyle(
+        "NormalText",
+        parent=styles["Normal"],
+        fontSize=11,
+        leading=14
+    )
+
     story = []
+    story.append(Paragraph("NutriVision – Nutrition Report", styles["Title"]))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph(
+        f"Generated on: {datetime.now().strftime('%d-%m-%Y %H:%M')}",
+        styles["Normal"]
+    ))
+    story.append(Spacer(1, 14))
 
-    story.append(Paragraph("<b>NutriVision – Nutrition Report</b>", styles["Title"]))
-    story.append(Spacer(1, 12))
-
-    for line in text.split("\n"):
+    for line in clean_text(text).split("\n"):
         if line.strip():
-            story.append(Paragraph(line, styles["Normal"]))
+            story.append(Paragraph(line, normal))
             story.append(Spacer(1, 6))
+
+    story.append(Spacer(1, 20))
+    story.append(Paragraph("Generated using NutriVision App", styles["Italic"]))
 
     doc.build(story)
     buf.seek(0)
@@ -150,10 +176,9 @@ input, textarea {
 # --------------------------------------------------
 if not st.session_state.logged_in:
     st.title("🔐 NutriVision Authentication")
+    t1, t2 = st.tabs(["Login", "Create Account"])
 
-    tab1, tab2 = st.tabs(["Login", "Create Account"])
-
-    with tab1:
+    with t1:
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
         if st.button("Login"):
@@ -167,7 +192,7 @@ if not st.session_state.logged_in:
             else:
                 st.error("Invalid credentials")
 
-    with tab2:
+    with t2:
         nu = st.text_input("New Username")
         np = st.text_input("New Password", type="password")
         if st.button("Create Account"):
@@ -245,12 +270,7 @@ if st.button("Analyse Food"):
         p, c, f = extract_macros(result)
         if all(v is not None for v in [p, c, f]) and (p + c + f) > 0:
             fig, ax = plt.subplots(figsize=(4,4))
-            ax.pie(
-                [p, c, f],
-                labels=["Protein","Carbs","Fat"],
-                autopct="%1.1f%%",
-                startangle=90
-            )
+            ax.pie([p,c,f], labels=["Protein","Carbs","Fat"], autopct="%1.1f%%", startangle=90)
             ax.set_title("Macronutrient Distribution")
             st.pyplot(fig)
             plt.close(fig)
@@ -264,16 +284,14 @@ if st.button("Analyse Food"):
 
         # WHATSAPP SHARE
         share_text = f"""
-🥗 NutriVision – Nutrition Report
+NutriVision – Nutrition Report
 
 User: {st.session_state.username}
 
 {result}
 
-📄 Download full PDF from:
+Download full PDF:
 {APP_URL}
-
-🚀 Generated using NutriVision App
 """
         st.markdown(
             f"""
@@ -299,7 +317,6 @@ User: {st.session_state.username}
 # HISTORY
 # --------------------------------------------------
 st.markdown("## 📅 Calorie History")
-
 con = db(); cur = con.cursor()
 cur.execute("""
 SELECT date, meal, calories
