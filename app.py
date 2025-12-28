@@ -1,38 +1,29 @@
 import streamlit as st
-import sqlite3
-import os, re, hashlib, html
+import sqlite3, os, re, hashlib, urllib.parse
 from datetime import datetime
 from io import BytesIO
 from PIL import Image
-import urllib.parse
-
-# Matplotlib (Render-safe)
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import google.generativeai as genai
 
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import getSampleStyleSheet
 
 # --------------------------------------------------
-# PAGE CONFIG
+# CONFIG
 # --------------------------------------------------
 st.set_page_config(page_title="NutriVision", page_icon="🥗", layout="wide")
 
-# --------------------------------------------------
-# GEMINI CONFIG (Render-safe)
-# --------------------------------------------------
+if not os.getenv("GOOGLE_API_KEY"):
+    st.error("❌ GOOGLE_API_KEY not found")
+    st.stop()
+
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
-# --------------------------------------------------
-# CONSTANTS
-# --------------------------------------------------
 DB = "nutrivision.db"
 HIGH_CAL_THRESHOLD = 500
-APP_URL = "https://nutri-app.onrender.com"   # 🔁 change if needed
 
 # --------------------------------------------------
 # DATABASE
@@ -43,12 +34,14 @@ def db():
 def init_db():
     con = db()
     cur = con.cursor()
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users(
         username TEXT PRIMARY KEY,
         password TEXT
     )
     """)
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS history(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,6 +52,7 @@ def init_db():
         details TEXT
     )
     """)
+
     con.commit()
     con.close()
 
@@ -71,59 +65,26 @@ def hash_pass(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
 def extract_calories(text):
-    m = re.search(r'(\d+)\s*kcal', text, re.I)
+    m = re.search(r'calorie[s]?\s*[:\-]?\s*(\d+)', text, re.I)
     return int(m.group(1)) if m else 0
 
 def extract_macros(text):
     p = re.search(r'Protein[:\s]+(\d+)', text, re.I)
     c = re.search(r'Carb\w*[:\s]+(\d+)', text, re.I)
     f = re.search(r'Fat\w*[:\s]+(\d+)', text, re.I)
-    if not (p and c and f):
+    if None in (p, c, f):
         return None, None, None
     return int(p.group(1)), int(c.group(1)), int(f.group(1))
 
-# ---------- PDF CLEANING ----------
-def clean_text(text):
-    text = html.escape(text)
-    text = text.replace("**", "")
-    text = text.replace("*", "")
-    return text
-
 def generate_pdf(text):
     buf = BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=letter,
-        rightMargin=40,
-        leftMargin=40,
-        topMargin=50,
-        bottomMargin=40
-    )
-
+    doc = SimpleDocTemplate(buf, pagesize=letter)
     styles = getSampleStyleSheet()
-    normal = ParagraphStyle(
-        "NormalText",
-        parent=styles["Normal"],
-        fontSize=11,
-        leading=14
-    )
-
     story = []
-    story.append(Paragraph("NutriVision – Nutrition Report", styles["Title"]))
-    story.append(Spacer(1, 10))
-    story.append(Paragraph(
-        f"Generated on: {datetime.now().strftime('%d-%m-%Y %H:%M')}",
-        styles["Normal"]
-    ))
-    story.append(Spacer(1, 14))
 
-    for line in clean_text(text).split("\n"):
-        if line.strip():
-            story.append(Paragraph(line, normal))
-            story.append(Spacer(1, 6))
-
-    story.append(Spacer(1, 20))
-    story.append(Paragraph("Generated using NutriVision App", styles["Italic"]))
+    for line in text.split("\n"):
+        story.append(Paragraph(line, styles["Normal"]))
+        story.append(Spacer(1, 8))
 
     doc.build(story)
     buf.seek(0)
@@ -132,9 +93,6 @@ def generate_pdf(text):
 def ai_analysis(prompt, image):
     model = genai.GenerativeModel("models/gemini-2.5-flash")
     return model.generate_content([prompt, image]).text
-
-def whatsapp_share(text):
-    return "https://wa.me/?text=" + urllib.parse.quote(text)
 
 # --------------------------------------------------
 # SESSION
@@ -145,7 +103,7 @@ if "username" not in st.session_state:
     st.session_state.username = ""
 
 # --------------------------------------------------
-# DARK UI
+# DARK THEME
 # --------------------------------------------------
 st.markdown("""
 <style>
@@ -166,19 +124,21 @@ input, textarea {
     background:#121212;
     padding:16px;
     border-radius:10px;
-    box-shadow:0 0 20px rgba(0,255,255,.2);
+    margin-bottom:12px;
+    box-shadow:0 0 15px rgba(0,255,255,.15);
 }
 </style>
 """, unsafe_allow_html=True)
 
 # --------------------------------------------------
-# AUTH
+# AUTHENTICATION
 # --------------------------------------------------
 if not st.session_state.logged_in:
     st.title("🔐 NutriVision Authentication")
-    t1, t2 = st.tabs(["Login", "Create Account"])
 
-    with t1:
+    tab1, tab2 = st.tabs(["Login", "Create Account"])
+
+    with tab1:
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
         if st.button("Login"):
@@ -192,22 +152,23 @@ if not st.session_state.logged_in:
             else:
                 st.error("Invalid credentials")
 
-    with t2:
+    with tab2:
         nu = st.text_input("New Username")
         np = st.text_input("New Password", type="password")
         if st.button("Create Account"):
             try:
                 con = db(); cur = con.cursor()
-                cur.execute("INSERT INTO users VALUES (?,?)", (nu, hash_pass(np)))
+                cur.execute("INSERT INTO users VALUES (?,?)",
+                            (nu, hash_pass(np)))
                 con.commit(); con.close()
-                st.success("Account created. Login now.")
+                st.success("Account created successfully")
             except:
                 st.error("Username already exists")
 
     st.stop()
 
 # --------------------------------------------------
-# MAIN UI
+# MAIN APP
 # --------------------------------------------------
 st.title("🥗 NutriVision")
 st.write(f"Welcome **{st.session_state.username}**")
@@ -219,33 +180,27 @@ if uploaded:
     st.image(Image.open(uploaded), width=300)
 
 prompt = f"""
-You are a nutritionist.
+You are a professional nutritionist.
 
 Quantity: {qty}
 
 Meal Name:
-Ingredients and Calories:
-Total Calories: X kcal
-
-Macronutrient Profile:
+Ingredients:
+Calories:
 Protein: X
 Carbs: X
-Fat: X
+Fats: X
 Fiber: X grams
-
 Healthiness:
 Recommendation:
 Kids suitability:
 """
 
-# --------------------------------------------------
-# ANALYSIS
-# --------------------------------------------------
 if st.button("Analyse Food"):
     if not uploaded:
         st.warning("Upload image first")
     else:
-        with st.spinner("Analyzing..."):
+        with st.spinner("Analyzing food image..."):
             image_data = {"mime_type": uploaded.type, "data": uploaded.getvalue()}
             result = ai_analysis(prompt, image_data)
 
@@ -258,7 +213,7 @@ if st.button("Analyse Food"):
         """, (
             st.session_state.username,
             datetime.now().strftime("%d-%m-%Y %H:%M"),
-            result.split("\n")[0],
+            result.splitlines()[0],
             calories,
             result
         ))
@@ -266,57 +221,36 @@ if st.button("Analyse Food"):
 
         st.markdown(f"<div class='card'>{result}</div>", unsafe_allow_html=True)
 
-        # PIE CHART
         p, c, f = extract_macros(result)
-        if all(v is not None for v in [p, c, f]) and (p + c + f) > 0:
-            fig, ax = plt.subplots(figsize=(4,4))
-            ax.pie([p,c,f], labels=["Protein","Carbs","Fat"], autopct="%1.1f%%", startangle=90)
-            ax.set_title("Macronutrient Distribution")
+        if None not in (p, c, f) and (p + c + f) > 0:
+            fig, ax = plt.subplots()
+            ax.pie([p, c, f], labels=["Protein", "Carbs", "Fat"], autopct="%1.1f%%")
             st.pyplot(fig)
-            plt.close(fig)
 
-        # PDF
+        pdf = generate_pdf(result)
         st.download_button(
             "📄 Download PDF Report",
-            generate_pdf(result),
-            "nutrivision_report.pdf"
+            pdf,
+            "nutrivision_report.pdf",
+            mime="application/pdf"
         )
 
-        # WHATSAPP SHARE
-        share_text = f"""
-NutriVision – Nutrition Report
+        wa_text = f"""
+🥗 NutriVision Report
+Meal: {result.splitlines()[0]}
+Calories: {calories} kcal
 
-User: {st.session_state.username}
-
-{result}
-
-Download full PDF:
-{APP_URL}
+(Open NutriVision app to download PDF)
 """
         st.markdown(
-            f"""
-            <a href="{whatsapp_share(share_text)}" target="_blank"
-            style="
-                display:inline-block;
-                background:#25D366;
-                color:white;
-                padding:12px 20px;
-                border-radius:14px;
-                font-size:16px;
-                font-weight:700;
-                text-decoration:none;
-                margin-top:12px;
-            ">
-            📤 Share Report on WhatsApp
-            </a>
-            """,
-            unsafe_allow_html=True
+            f"[📤 Share on WhatsApp](https://wa.me/?text={urllib.parse.quote(wa_text)})"
         )
 
 # --------------------------------------------------
-# HISTORY
+# CALORIE HISTORY
 # --------------------------------------------------
 st.markdown("## 📅 Calorie History")
+
 con = db(); cur = con.cursor()
 cur.execute("""
 SELECT date, meal, calories
@@ -327,9 +261,17 @@ ORDER BY date DESC
 rows = cur.fetchall()
 con.close()
 
+current_day = None
+
 for d, meal, cal in rows:
+    day = d.split(" ")[0]
+    if day != current_day:
+        st.subheader(f"📆 {day}")
+        current_day = day
+
     color = "#FF5252" if cal >= HIGH_CAL_THRESHOLD else "#81C784"
     icon = "🔴" if cal >= HIGH_CAL_THRESHOLD else "🟢"
+
     st.markdown(
         f"""
         <div class='card' style='border-left:6px solid {color};'>
@@ -344,10 +286,11 @@ for d, meal, cal in rows:
 # FOOTER
 # --------------------------------------------------
 st.markdown("""
-<hr>
-<div style="text-align:center; color:#B0BEC5; font-size:14px;">
-<b>Developed by</b> Aishwarya Patil · C. G. Balasubramanyam Singh · Madhushree · Pradeep S<br>
-Final Year – Information Science & Engineering<br>
-PDA College of Engineering © 2025
+<hr style="border:1px solid #2e3b4e;">
+<div style="text-align:center; color:#B0BEC5; font-size:14px; line-height:1.6;">
+    <b>Developed By</b><br>
+    Aishwarya Patil · C. G. Balasubramanyam Singh · Madhushree · Pradeep S<br>
+    <b>Final Year – Information Science & Engineering</b><br>
+    PDA College of Engineering © 2025
 </div>
 """, unsafe_allow_html=True)
